@@ -11,7 +11,9 @@ import os
 import numpy as np
 import cv2
 import torch
+from torch.autograd import Variable
 import random
+from skimage.transform import resize
 
 # ROS imports
 import rospy
@@ -20,8 +22,8 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 
 from number_detection.msg import BoundingBox, BoundingBoxes
-from utils.torch_utils import select_device, load_classifier
-from utils.general import check_img_size
+from utils.torch_utils import select_device #, load_classifier
+from utils.general import check_img_size, non_max_suppression
 from models.experimental import attempt_load
 
 # get the path to package
@@ -40,11 +42,12 @@ class NumberDetectionROSNode:
 
         if not os.path.isfile(self.weights_path):
             rospy.loginfo('[WARN] Weights not found. Downloading...')
+            
+            # download weights from dropbox or google drive
+            # os.system('wget https://api.wandb.ai/artifactsV2/gcp-us/norbertmarko/QXJ0aWZhY3Q6OTQwODY4OTg=/0ee7561470c2f3f3ec3cabee77b6e5e3')
         else:
             rospy.loginfo("[INFO] Weights found, loading %s", self.weights_path)
             
-            # download weights from dropbox or google drive
-
 
         # Load image parameter and confidence threshold
         self.image_topic = rospy.get_param(
@@ -86,7 +89,7 @@ class NumberDetectionROSNode:
             self.model.half()  # to FP16
 
         if self.classify:
-            self.modelc = load_classifier(name='resnet101', n=2)  # initialize
+            #self.modelc = load_classifier(name='resnet101', n=2)  # initialize
             self.modelc.load_state_dict(torch.load(
                 'weights/resnet101.pt', map_location=self.device)['model']).to(self.device).eval()
 
@@ -105,24 +108,140 @@ class NumberDetectionROSNode:
         self.bridge = CvBridge()
 
         # Load publisher topic
-        self.detected_objects_topic = rospy.get_param(
-            '~detected_objects_topic')
+        self.detected_objects_topic = rospy.get_param('~detected_objects_topic')
         self.published_image_topic = rospy.get_param('~detections_image_topic')
 
-        # Define subscribers
+        # Subscriber
         self.image_sub = rospy.Subscriber(
-            self.image_topic, Image, self.image_cb, queue_size=1, buff_size=2**24)
+            self.image_topic, Image, self.callback, queue_size=1, buff_size=2**24)
 
-        # Define publishers
+        # Publisher
         self.pub_ = rospy.Publisher(
-            self.detected_objects_topic, BoundingBoxes, queue_size=10)
+            self.detected_objects_topic, BoundingBoxes, queue_size=10
+        )
         self.pub_viz_ = rospy.Publisher(
-            self.published_image_topic, Image, queue_size=10)
-        rospy.loginfo("Launched node for object detection")
+            self.published_image_topic, Image, queue_size=10
+        )
+        rospy.loginfo("[INFO] Number detection node launched successfully!")
 
 
     def callback(self, ros_msg):
-        pass
+        
+        try:
+            self.cv_img = self.bridge.imgmsg_to_cv2(ros_msg, "rgb8")
+        except CvBridgeError as e:
+            print(e)
+
+        # Initialize detection results
+        detection_results = BoundingBoxes()
+        detection_results.header = ros_msg.header
+        detection_results.image_header = ros_msg.header
+        input_img = self.preprocess(self.cv_img)
+        input_img = Variable(input_img.type(torch.FloatTensor))
+
+        # Get detections from network
+        with torch.no_grad():
+            detections = self.model(input_img)[0]
+            detections = non_max_suppression(detections, self.conf_thres, self.iou_thres,
+                                             classes=self.classes, agnostic=self.agnostic_nms)
+        # Parse detections
+        if detections[0] is not None:
+            for detection in detections[0]:
+                # Get xmin, ymin, xmax, ymax, confidence and class
+                xmin, ymin, xmax, ymax, conf, det_class = detection
+                pad_x = max(self.h - self.w, 0) * \
+                    (self.network_img_size/max(self.h, self.w))
+                pad_y = max(self.w - self.h, 0) * \
+                    (self.network_img_size/max(self.h, self.w))
+                unpad_h = self.network_img_size-pad_y
+                unpad_w = self.network_img_size-pad_x
+                xmin_unpad = ((xmin-pad_x//2)/unpad_w)*self.w
+                xmax_unpad = ((xmax-xmin)/unpad_w)*self.w + xmin_unpad
+                ymin_unpad = ((ymin-pad_y//2)/unpad_h)*self.h
+                ymax_unpad = ((ymax-ymin)/unpad_h)*self.h + ymin_unpad
+
+                # Populate darknet message
+                detection_msg = BoundingBox()
+                detection_msg.xmin = int(xmin_unpad)
+                detection_msg.xmax = int(xmax_unpad)
+                detection_msg.ymin = int(ymin_unpad)
+                detection_msg.ymax = int(ymax_unpad)
+                detection_msg.probability = float(conf)
+                detection_msg.Class = self.names[int(det_class)]
+
+                # Append in overall detection message
+                detection_results.bounding_boxes.append(detection_msg)
+
+        # Publish detection results
+        self.pub_.publish(detection_results)
+
+        # Visualize detection results
+        if (self.publish_image):
+            self.visualize_and_publish(detection_results, self.cv_img)
+        return True
+
+
+    def preprocess(self, img):
+        # Extract image and shape
+        img = np.copy(img)
+        img = img.astype(float)
+        height, width, channels = img.shape
+        if (height != self.h) or (width != self.w):
+            self.h = height
+            self.w = width
+            # Determine image to be used
+            self.padded_image = np.zeros(
+                (max(self.h, self.w), max(self.h, self.w), channels)).astype(float)
+
+        # Add padding
+        if (self.w > self.h):
+            self.padded_image[(self.w-self.h)//2: self.h +
+                              (self.w-self.h)//2, :, :] = img
+        else:
+            self.padded_image[:, (self.h-self.w)//2: self.w +
+                              (self.h-self.w)//2, :] = img
+        # Resize and normalize
+        input_img = resize(self.padded_image, (self.network_img_size, self.network_img_size, 3))/255.
+
+        # Channels-first
+        input_img = np.transpose(input_img, (2, 0, 1))
+
+        # As pytorch tensor
+        input_img = torch.from_numpy(input_img).float()
+        input_img = input_img[None]
+
+        return input_img
+
+
+    def visualize_and_publish(self, output, imgIn):
+        # Copy image and visualize
+        imgOut = imgIn.copy()
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        fontScale = 0.8
+        thickness = 2
+        for index in range(len(output.bounding_boxes)):
+            label = output.bounding_boxes[index].Class
+            x_p1 = output.bounding_boxes[index].xmin
+            y_p1 = output.bounding_boxes[index].ymin
+            x_p3 = output.bounding_boxes[index].xmax
+            y_p3 = output.bounding_boxes[index].ymax
+            confidence = output.bounding_boxes[index].probability
+
+            # Set class color
+            color = self.colors[self.names.index(label)]
+
+            # Create rectangle
+            cv2.rectangle(imgOut, (int(x_p1), int(y_p1)), (int(x_p3), int(
+                y_p3)), (color[0], color[1], color[2]), thickness)
+            text = ('{:s}: {:.3f}').format(label, confidence)
+            cv2.putText(imgOut, text, (int(x_p1), int(y_p1+20)), font,
+                        fontScale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+        # Publish visualization image
+        image_msg = self.bridge.cv2_to_imgmsg(imgOut, "rgb8")
+        image_msg.header.frame_id = 'camera'
+        image_msg.header.stamp = rospy.Time.now()
+        self.pub_viz_.publish(image_msg)
 
 
     def main(self):
@@ -134,5 +253,3 @@ if __name__ == '__main__':
     rospy.init_node('number_detection', anonymous=True)
     det_ros = NumberDetectionROSNode()
     det_ros.main()
-    
-    print("[INFO] Node run successful!")
