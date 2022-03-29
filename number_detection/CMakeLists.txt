@@ -24,6 +24,11 @@ generate_messages(
     std_msgs
 )
 
+install(DIRECTORY
+launch
+DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+)
+
 catkin_package()
 
 include_directories()
