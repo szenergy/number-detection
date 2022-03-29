@@ -17,6 +17,10 @@ add_message_files(
 )
 
 
+# install python modules by invoking setup.py
+catkin_python_setup()
+
+
 generate_messages(
   DEPENDENCIES
     geometry_msgs
@@ -24,9 +28,19 @@ generate_messages(
     std_msgs
 )
 
-install(DIRECTORY
-launch
-DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+
+# makes python nodes visible for the launch file
+catkin_install_python(
+  PROGRAMS 
+    src/detect.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+
+
+# makes launch files visible
+install(
+  DIRECTORY
+    launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 
 catkin_package()
