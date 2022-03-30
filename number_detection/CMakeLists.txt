@@ -36,7 +36,7 @@ catkin_install_python(
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
 
-# makes launch files visible
+# makes launch and weights files visible
 install(
   DIRECTORY
     launch

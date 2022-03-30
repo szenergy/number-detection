@@ -1,9 +1,9 @@
 <launch>
   <include file="$(find number_detection)/launch/detector.launch">
     <!-- Camera topic and weights, config and classes files -->
-    <arg name="image_topic"	                value="/camera/image_raw"/>
+    <arg name="image_topic"	                value="/zed2/zed_node/rgb/image_rect_color"/>
     <!-- Absolute path to weights file (change this) -->
-    <arg name="weights_name"	            value="$(find my_detector)/weights/weights.pt"/>
+    <arg name="weights_name"	            value="$(find number_detection)/weights/best.pt"/>
 
     <!-- Published topics -->
     <arg name="publish_image"	            value="true"/>
@@ -11,6 +11,6 @@
     <arg name="detections_image_topic"      value="detections_image_topic"/>
 
     <!-- Detection confidence -->
-    <arg name="confidence"                  value="0.7"/>
+    <arg name="confidence"                  value="0.2"/>
   </include>
 </launch>
